@@ -181,7 +181,9 @@ public:
         read_file_cpp(&pBuf, &nSize, szEnginePath);
         IRuntime *runtime = createInferRuntime(*trt_logger);
         engine = runtime->deserializeCudaEngine(pBuf, nSize);
-        runtime->destroy();
+        // Removed API
+        // runtime->destroy();
+        delete runtime;
         if (!engine) {
             av_log(ctx, AV_LOG_ERROR, "No engine generated\n");
             return;
@@ -209,11 +211,17 @@ public:
         }
 
         IBuilderConfig *config = builder->createBuilderConfig();
-        config->setMaxWorkspaceSize(pParam->nMaxWorkspaceSize);
+        // Removed API
+        // config->setMaxWorkspaceSize(pParam->nMaxWorkspaceSize);
+        config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, pParam->nMaxWorkspaceSize);
         if (pParam->bFp16) {
             config->setFlag(BuilderFlag::kFP16);
         }
-        engine = builder->buildEngineWithConfig(*network, *config);
+        // Removed API
+        // engine = builder->buildEngineWithConfig(*network, *config);
+        nvinfer1::IHostMemory* serializedModel = builder->buildSerializedNetwork(*network, *config);
+        nvinfer1::IRuntime* runtime = nvinfer1::createInferRuntime(*trt_logger);
+        nvinfer1::ICudaEngine* engine = runtime->deserializeCudaEngine(serializedModel->data(), serializedModel->size());
         if (serialize)
         {
             string engineCacheName = szOnnxPath;
@@ -222,9 +230,14 @@ public:
             av_log(ctx, AV_LOG_INFO, "Write engine cache for ONNX model\n");
             write_file(serializedModel->data(), serializedModel->size(), engineCacheName.c_str());
         }
-        config->destroy();
-        network->destroy();
-        builder->destroy();
+        // Removed API
+        // delete config->destroy();
+        // delete network->destroy();
+        // delete builder->destroy();
+
+        delete config;
+        delete network;
+        delete builder;
 
         if (!engine) {
             av_log(ctx, AV_LOG_ERROR, "No engine created\n");
@@ -234,10 +247,14 @@ public:
     }
     virtual ~TrtLite() {
         if (context) {
-            context->destroy();
+            // Removed API
+            // context->destroy();
+            delete context;
         }
         if (engine) {
-            engine->destroy();
+            // Removed API
+            // engine->destroy();
+            delete engine;
         }
         // if (ctx) {
         //     delete ctx;
@@ -256,7 +273,7 @@ public:
                 "Engine was built with explicit batch but is executed with batch size != 1. Results may be incorrect.\n");
             return;
         }
-        if (engine->getNbBindings() != NUM_TRT_IO) {
+        if (engine->getNbIOTensors() != NUM_TRT_IO) {
             av_log(ctx, AV_LOG_ERROR, "Number of bindings conflicts with input and output\n");
             return;
         }
@@ -267,7 +284,9 @@ public:
                 return;
             }
         }
-        ck(context->enqueue(nBatch, data, stm, evtInputConsumed), ctx);
+        // Removed API
+        // ck(context->enqueue(nBatch, data, stm, evtInputConsumed), ctx);
+        ck(context->enqueueV3(stm), ctx);
     }
     void Execute(map<int, Dims> i2shape, void* data[], cudaStream_t stm = 0, cudaEvent_t* evtInputConsumed = nullptr) {
         if (!engine) {
@@ -278,7 +297,9 @@ public:
             av_log(ctx, AV_LOG_ERROR, "Engine was built with static-shaped input\n");
             return;
         }
-        if (engine->getNbBindings() != NUM_TRT_IO) {
+        // Removed API
+        // if (engine->getNbBindings() != NUM_TRT_IO) {
+        if (engine->getNbIOTensors() != NUM_TRT_IO) {
             av_log(ctx, AV_LOG_ERROR, "Number of bindings conflicts with input and output\n");
             return;
         }
@@ -290,9 +311,13 @@ public:
             }
         }
         for (auto &it : i2shape) {
-            context->setBindingDimensions(it.first, it.second);
+            // Removed API
+            // context->setBindingDimensions(it.first, it.second);
+            context->setInputShape(engine->getIOTensorName(it.first), it.second);
         }
-        ck(context->enqueueV2(data, stm, evtInputConsumed), ctx);
+        // Removed API
+        // ck(context->enqueueV2(data, stm, evtInputConsumed), ctx);
+        ck(context->enqueueV3(stm), ctx);
     }
 
     vector<IOInfo> ConfigIO(int nBatchSize) {
@@ -305,10 +330,16 @@ public:
             av_log(ctx, AV_LOG_ERROR, "Engine must be built with implicit batch size (and static shape)\n");
             return vInfo;
         }
-        for (int i = 0; i < engine->getNbBindings(); i++) {
-            vInfo.push_back({string(engine->getBindingName(i)), engine->bindingIsInput(i), 
-                MakeDim(nBatchSize, engine->getBindingDimensions(i)), engine->getBindingDataType(i)});
+        // Removed API
+        // for (int i = 0; i < engine->getNbBindings(); i++) {
+        for (int i = 0; i < engine->getNbIOTensors(); i++) {
+            // vInfo.push_back({string(engine->getBindingName(i)), engine->bindingIsInput(i), 
+            //     MakeDim(nBatchSize, engine->getBindingDimensions(i)), engine->getBindingDataType(i)});
+            vInfo.push_back({string(engine->getIOTensorName(i)), engine->getTensorIOMode(engine->getIOTensorName(i)) == nvinfer1::TensorIOMode::kINPUT, 
+                MakeDim(nBatchSize, engine->getTensorShape(engine->getIOTensorName(i))), engine->getTensorDataType(engine->getIOTensorName(i))});
         }
+
+
         return vInfo;
     }
     vector<IOInfo> ConfigIO(map<int, Dims> i2shape) {
@@ -329,15 +360,20 @@ public:
             }
         }
         for (auto &it : i2shape) {
-            context->setBindingDimensions(it.first, it.second);
+            // context->setBindingDimensions(it.first, it.second);
+            context->setInputShape(engine->getIOTensorName(it.first), it.second);
         }
         if (!context->allInputDimensionsSpecified()) {
             av_log(ctx, AV_LOG_ERROR, "Not all binding shape are specified\n");
             return vInfo;
         }
-        for (int i = 0; i < engine->getNbBindings(); i++) {
-            vInfo.push_back({string(engine->getBindingName(i)), engine->bindingIsInput(i), 
-                context->getBindingDimensions(i), engine->getBindingDataType(i)});
+        // for (int i = 0; i < engine->getNbBindings(); i++) {
+        for (int i = 0; i < engine->getNbIOTensors(); i++) {
+            // vInfo.push_back({string(engine->getBindingName(i)), engine->bindingIsInput(i), 
+            //     context->getBindingDimensions(i), engine->getBindingDataType(i)});
+            // vInfo.push_back({string(engine->getBindingName(i)), engine->bindingIsInput(i), 
+            vInfo.push_back({string(engine->getIOTensorName(i)), engine->getTensorIOMode(engine->getIOTensorName(i)) == nvinfer1::TensorIOMode::kINPUT, 
+                context->getTensorShape(engine->getIOTensorName(i)), engine->getTensorDataType(engine->getIOTensorName(i))});
         }
         return vInfo;
     }
@@ -347,12 +383,16 @@ public:
             av_log(ctx, AV_LOG_ERROR, "No engine\n");
             return;
         }
-        av_log(ctx, AV_LOG_INFO, "nbBindings: %d\n", engine->getNbBindings());
+        // av_log(ctx, AV_LOG_INFO, "nbBindings: %d\n", engine->getNbBindings());
+        av_log(ctx, AV_LOG_INFO, "nbBindings: %d\n", engine->getNbIOTensors());
         // Only contains engine-level IO information: if dynamic shape is used,
         // dimension -1 will be printed
-        for (int i = 0; i < engine->getNbBindings(); i++) {
-            av_log(ctx, AV_LOG_INFO, "#%d: %s\n", i, IOInfo{string(engine->getBindingName(i)), engine->bindingIsInput(i),
-                engine->getBindingDimensions(i), engine->getBindingDataType(i)}.to_string().c_str());
+        // for (int i = 0; i < engine->getNbBindings(); i++) {
+        for (int i = 0; i < engine->getNbIOTensors(); i++) {
+            // av_log(ctx, AV_LOG_INFO, "#%d: %s\n", i, IOInfo{string(engine->getBindingName(i)), engine->bindingIsInput(i),
+            //     engine->getBindingDimensions(i), engine->getBindingDataType(i)}.to_string().c_str());
+            av_log(ctx, AV_LOG_INFO, "#%d: %s\n", i, IOInfo{string(engine->getIOTensorName(i)), engine->getTensorIOMode(engine->getIOTensorName(i)) == nvinfer1::TensorIOMode::kINPUT,
+                engine->getTensorShape(engine->getIOTensorName(i)), engine->getTensorDataType(engine->getIOTensorName(i))}.to_string().c_str());
         }
     }
     
@@ -427,8 +467,11 @@ private:
     }
     static size_t GetBytesOfBinding(int iBinding, ICudaEngine *engine, IExecutionContext *context = nullptr) {
         size_t aValueSize[] = {4, 2, 1, 4, 1};
-        size_t nSize = aValueSize[(int)engine->getBindingDataType(iBinding)];
-        const Dims &dims = context ? context->getBindingDimensions(iBinding) : engine->getBindingDimensions(iBinding);
+        // Removed API
+        // size_t nSize = aValueSize[(int)engine->getBindingDataType(iBinding)];
+        // const Dims &dims = context ? context->getBindingDimensions(iBinding) : engine->getBindingDimensions(iBinding);
+        size_t nSize = aValueSize[(int)engine->getTensorDataType(engine->getIOTensorName(iBinding))];
+        const Dims &dims = context ? context->getTensorShape(engine->getIOTensorName(iBinding)) : engine->getTensorShape(engine->getIOTensorName(iBinding));
         for (int i = 0; i < dims.nbDims; i++) {
             nSize *= dims.d[i];
         }
